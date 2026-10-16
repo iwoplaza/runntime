@@ -9,7 +9,13 @@ import { createTopkSelectPipeline, topkSelectHandle } from '../../kernels/reduce
 import { defineSpec, floatDtype, narrow, narrowFloat } from './spec.ts';
 
 export const softmaxSpec = defineSpec({
-  attrs: () => undefined,
+  attrs: (p) => {
+    const [masked, windowLeft, windowRight] = p.attrs as readonly number[];
+    if (windowLeft === undefined || windowRight === undefined) {
+      throw new Error('dispatch: softmax attrs need [masked, windowLeft, windowRight]');
+    }
+    return { masked: masked === 1, windowLeft, windowRight };
+  },
   // vec4 depends only on cols % 4, so a new width never builds a pipeline.
   cfg: (node, _attrs, ctx) => ({
     vec4: node.shape.dims![1]! % 4 === 0,
@@ -17,15 +23,26 @@ export const softmaxSpec = defineSpec({
   }),
   pipeline: (root, dtype, cfg) =>
     createSoftmaxPipeline(root, elemFor(dtype), cfg.vec4, cfg.subgroups),
-  encode: ({ node, cfg, pipeline, inputs, out, ctx }) => {
+  encode: ({ node, attrs, cfg, pipeline, inputs, out, ctx }) => {
     const [rows, cols] = node.shape.dims as [number, number];
     const dtype = node.shape.dtype;
+    const { masked, windowLeft, windowRight } = attrs;
     return [
       softmaxHandle(
         ctx.root,
         pipeline,
-        { rows, cols, vec4: cfg.vec4, subgroups: cfg.subgroups },
-        { x: narrowFloat(inputs[0]!, dtype), out: narrowFloat(out, dtype) },
+        {
+          rows,
+          cols,
+          vec4: cfg.vec4,
+          subgroups: cfg.subgroups,
+          mask: masked ? { windowLeft, windowRight } : undefined,
+        },
+        {
+          x: narrowFloat(inputs[0]!, dtype),
+          segs: masked ? narrow(inputs[1]!, 'f32') : ctx.dummy('f32'),
+          out: narrowFloat(out, dtype),
+        },
         elemFor(dtype),
       ),
     ];
@@ -78,24 +95,37 @@ export const layerNormSpec = defineSpec({
 });
 
 export const rmsNormSpec = defineSpec({
-  attrs: (p) => ({ eps: p.scalar! }),
-  cfg: (node, _attrs, ctx) => ({
-    vec4: node.shape.dims![1]! % 4 === 0,
+  attrs: (p) => {
+    const [group, outScale] = p.attrs as readonly number[];
+    return { eps: p.scalar!, group: group!, outScale: outScale! };
+  },
+  cfg: (_node, attrs, ctx) => ({
+    vec4: attrs.group % 4 === 0,
     subgroups: ctx.subgroupsOk,
   }),
   pipeline: (root, dtype, cfg) =>
     createRmsNormPipeline(root, elemFor(dtype), cfg.vec4, cfg.subgroups),
   encode: ({ node, attrs, cfg, pipeline, inputs, out, ctx }) => {
-    const [rows, cols] = node.shape.dims as [number, number];
     const dtype = node.shape.dtype;
+    const hasResidual = inputs.length > 2;
     return [
       rmsNormHandle(
         ctx.root,
         pipeline,
-        { rows, cols, eps: attrs.eps, vec4: cfg.vec4, subgroups: cfg.subgroups },
+        {
+          rows: node.shape.elems / attrs.group,
+          cols: attrs.group,
+          eps: attrs.eps,
+          weightLen: node.pending!.inputs[1]!.shape.elems,
+          hasResidual: hasResidual ? 1 : 0,
+          outScale: attrs.outScale,
+          vec4: cfg.vec4,
+          subgroups: cfg.subgroups,
+        },
         {
           x: narrowFloat(inputs[0]!, dtype),
           weight: narrowFloat(inputs[1]!, dtype),
+          residual: hasResidual ? narrowFloat(inputs[2]!, dtype) : ctx.dummy(floatDtype(dtype)),
           out: narrowFloat(out, dtype),
         },
         elemFor(dtype),
