@@ -8,12 +8,13 @@
  *  The depthwise conv's own identity branch lives inside RepDW, so it is not
  *  a block-level residual. */
 
-import { add, channelAffine, nn } from '../../core/index.ts';
+import { add, derivedTensor, nn, type LazyStateDict } from '../../core/index.ts';
 import type { Value } from '../../core/index.ts';
+import { requireTensor } from '../errors.ts';
 import { Conv2dBN, RepDW } from './layers.ts';
 import { SS2D, type SS2DConfig } from './ss2d.ts';
 
-const { Module, Parameter } = nn;
+const { Module } = nn;
 
 export class Mlp extends Module {
   readonly fc1: Conv2dBN;
@@ -32,19 +33,38 @@ export class Mlp extends Module {
 export class ConvBlock extends Module {
   readonly dwconv: RepDW;
   readonly mlp: Mlp;
-  readonly layer_scale: InstanceType<typeof Parameter>;
   constructor(readonly channels: number) {
     super();
     this.dwconv = new RepDW(channels, { kernelSize: 3 });
     this.mlp = new Mlp(channels);
-    // The checkpoint stores [C, 1, 1]; channelAffine only reads the element
-    // count, so the parameter is declared flat.
-    this.layer_scale = new Parameter({ elems: channels, dtype: 'f32', dims: [channels] });
   }
   forward(x: Value): Value {
-    const mixed = this.dwconv.forward(x);
-    // Per-channel scale in-layout — the hwc4 channelAffine kernel.
-    return add(x, channelAffine(this.mlp.forward(mixed), this.layer_scale.value));
+    // layer_scale lives in fc2's weights, so the residual add rides fc2's
+    // epilogue.
+    return add(x, this.mlp.forward(this.dwconv.forward(x)));
+  }
+
+  /** Scales fc2's BatchNorm affine by layer_scale, which folds into fc2 with
+   *  the BatchNorm. */
+  override transformStateDict(sd: LazyStateDict, prefix: string): void {
+    const key = (n: string) => (prefix ? `${prefix}.${n}` : n);
+    const at = (n: string) => requireTensor(sd, key(n), `ConvBlock at '${prefix}'`);
+    const scale = at('layer_scale');
+    for (const n of ['mlp.fc2.bn.weight', 'mlp.fc2.bn.bias']) {
+      const src = at(n);
+      sd.tensors.set(
+        key(n),
+        derivedTensor(
+          src.shape,
+          async () => {
+            const [v, s] = await Promise.all([src.f32(), scale.f32()]);
+            return v.map((x, o) => x * s[o]!);
+          },
+          src.byteLength + (n.endsWith('weight') ? scale.byteLength : 0),
+        ),
+      );
+    }
+    sd.tensors.delete(key('layer_scale'));
   }
 }
 

@@ -18,8 +18,13 @@ class ResConfUnit extends Module {
   readonly conv2: InstanceType<typeof Conv2d>;
   constructor(features: number) {
     super();
-    this.conv1 = new Conv2d(features, features, { kernelSize: 3, padding: 1, activation: 'relu' });
-    this.conv2 = new Conv2d(features, features, { kernelSize: 3, padding: 1 });
+    this.conv1 = new Conv2d(features, features, {
+      kernelSize: 3,
+      padding: 1,
+      activation: 'relu',
+      winograd: true,
+    });
+    this.conv2 = new Conv2d(features, features, { kernelSize: 3, padding: 1, winograd: true });
   }
   forward(x: Value): Value {
     return add(x, this.conv2.forward(this.conv1.forward(relu(x))));
@@ -58,7 +63,8 @@ class Scratch extends Module<[readonly Value[], number], Value> {
   constructor(tapChannels: readonly number[], features: number) {
     super();
     // rn convs are bias-free (the checkpoint carries weight only).
-    const rn = (c: number) => new Conv2d(c, features, { kernelSize: 3, padding: 1, bias: false });
+    const rn = (c: number) =>
+      new Conv2d(c, features, { kernelSize: 3, padding: 1, bias: false, winograd: true });
     this.layer1_rn = rn(tapChannels[0]!);
     this.layer2_rn = rn(tapChannels[1]!);
     this.layer3_rn = rn(tapChannels[2]!);
@@ -67,7 +73,11 @@ class Scratch extends Module<[readonly Value[], number], Value> {
     this.refinenet3 = new Fusion(features);
     this.refinenet2 = new Fusion(features);
     this.refinenet1 = new Fusion(features);
-    this.output_conv1 = new Conv2d(features, features / 2, { kernelSize: 3, padding: 1 });
+    this.output_conv1 = new Conv2d(features, features / 2, {
+      kernelSize: 3,
+      padding: 1,
+      winograd: true,
+    });
     // torch Sequential [conv, ReLU, conv, ReLU] — only 0 and 2 hold weights,
     // so the ReLU slots are placeholders that keep the numeric field names
     // lined up with the checkpoint. Both ReLUs ride the conv epilogues.
