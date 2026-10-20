@@ -98,8 +98,48 @@ describe('conv2d', () => {
     const bias = input([16], 'f16');
     const c = conv2d(x, weight, bias, { ...plain, kernelSize: 1, activation: 'silu' });
     expect(c.pending?.inputs).toEqual([x, weight, bias]);
-    expect(c.pending?.attrs?.at(-1)).toBe(ACT_CODE.silu);
+    // attrs: kH, kW, stride, padding, groups, hasBias, act, winograd
+    expect(c.pending?.attrs?.[6]).toBe(ACT_CODE.silu);
+    expect(c.pending?.attrs?.[7]).toBe(0);
   });
+
+  it('marks a winograd conv', () => {
+    const c = conv2d(hwc4Input(8, 6, 6), packedWeight(16, 72), undefined, {
+      ...plain,
+      kernelSize: 3,
+      padding: 1,
+      winograd: true,
+    });
+    expect(c.shape).toEqual(hwc4Input(16, 6, 6).shape);
+    expect(c.pending?.attrs?.[7]).toBe(1);
+  });
+
+  it.each([
+    { name: 'a 1×1 kernel', kernelSize: 1, padding: 0 },
+    { name: 'stride 2', stride: 2 },
+    { name: 'no padding', padding: 0 },
+    { name: 'depthwise groups', groups: 8, cols: 9, cOut: 8 },
+  ])(
+    'rejects winograd on $name',
+    ({
+      kernelSize = 3,
+      stride = 1,
+      padding = 1,
+      groups = 1,
+      cols = 8 * kernelSize ** 2,
+      cOut = 16,
+    }) => {
+      expect(() =>
+        conv2d(hwc4Input(8, 6, 6), packedWeight(cOut, cols), undefined, {
+          kernelSize,
+          stride,
+          padding,
+          groups,
+          winograd: true,
+        }),
+      ).toThrow(/winograd needs a 3×3, stride 1, padding 1, groups 1 conv/);
+    },
+  );
 
   it.each([
     { name: 'a row-major input', x: input([8, 6, 6], 'f16'), error: /input must be hwc4-stored/ },

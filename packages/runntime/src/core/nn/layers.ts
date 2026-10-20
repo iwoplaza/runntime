@@ -18,7 +18,9 @@ import {
 import { matrix, type Value } from '../graph/value.ts';
 import {
   convToTapMajor,
+  packConv1x1Hwc4F16,
   packConvHwc4F16,
+  packConvWinogradF16,
   packDwHwc4F16,
   permuteConvTransposeF16,
   transposeF32,
@@ -288,11 +290,17 @@ export class Conv2d extends Module {
       bias?: boolean;
       /** Fuses silu, gelu or relu into the conv kernel. */
       activation?: ConvAct;
+      /** Runs a 3×3, stride 1, padding 1 conv as Winograd F(4×4, 3×3): a
+       *  quarter of the multiplies, rounded differently in f16. The weight
+       *  packs into 4× its size. */
+      winograd?: boolean;
     },
   ) {
     super();
-    const { kernelSize, groups = 1, bias = true } = opts;
+    const { kernelSize, stride = 1, padding = 0, groups = 1, bias = true, winograd } = opts;
     const [kH, kW] = typeof kernelSize === 'number' ? [kernelSize, kernelSize] : kernelSize;
+    // The convs the dispatch runs on the 1×1 kernels.
+    const pointwise = kH === 1 && kW === 1 && stride === 1 && padding === 0 && groups === 1;
     const dw = groups === inChannels && inChannels === outChannels;
     if (groups !== 1 && !dw) {
       throw new Error(
@@ -308,6 +316,8 @@ export class Conv2d extends Module {
         if (!(data instanceof Uint16Array)) {
           throw new Error('Conv2d: weight must arrive as f16 bits (Uint16Array)');
         }
+        if (winograd) return packConvWinogradF16(data, outChannels, inChannels);
+        if (pointwise) return packConv1x1Hwc4F16(data, outChannels, inChannels);
         return dw
           ? packDwHwc4F16(data, outChannels, kH, kW)
           : packConvHwc4F16(data, outChannels, inChannels, kH, kW);
@@ -320,13 +330,14 @@ export class Conv2d extends Module {
       : undefined;
   }
   forward(x: Value): Value {
-    const { kernelSize, stride = 1, padding = 0, groups = 1, activation } = this.opts;
+    const { kernelSize, stride = 1, padding = 0, groups = 1, activation, winograd } = this.opts;
     return conv2d(x, this.weight.value, this.bias?.value, {
       kernelSize,
       stride,
       padding,
       groups,
       activation,
+      winograd,
     });
   }
 }

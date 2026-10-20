@@ -7,7 +7,9 @@ import {
   f16ToF32,
   f32ArrayToF16Bits,
   f32ToF16Bits,
+  packConv1x1Hwc4F16,
   packConvHwc4F16,
+  packConvWinogradF16,
   packDwHwc4F16,
   permuteConvTransposeF16,
   transposeF32,
@@ -293,6 +295,95 @@ describe('packConvHwc4F16', () => {
     { name: 'empty', cOut: 0, cIn: 0, kH: 1, kW: 1, src: [], want: tiles(0, {}) },
   ])('$name', ({ cOut, cIn, kH, kW, src, want }) => {
     expect(packConvHwc4F16(new Uint16Array(src), cOut, cIn, kH, kW)).toEqual(want);
+  });
+});
+
+describe('packConv1x1Hwc4F16', () => {
+  // [cOut, cIn] -> 4x4 tiles of [in % 4][out % 4], tile (in block, out block)
+  // at inBlock·CO4 + outBlock. Channels past cOut / cIn are zero.
+  function tiles(count: number, entries: Record<number, number>): Uint16Array {
+    const out = new Uint16Array(count * 16);
+    for (const [i, v] of Object.entries(entries)) out[Number(i)] = v;
+    return out;
+  }
+
+  it.each([
+    {
+      name: '2 out, 2 in: one tile',
+      cOut: 2,
+      cIn: 2,
+      src: [1, 2, 3, 4],
+      want: tiles(1, { 0: 1, 1: 3, 4: 2, 5: 4 }),
+    },
+    {
+      // (o 0, i 4) in tile (1, 0) = 2; (o 4, i 0) in tile (0, 1) = 1;
+      // (o 1, i 2) in tile (0, 0), entry 2·4 + 1.
+      name: '5 out, 5 in: input block first',
+      cOut: 5,
+      cIn: 5,
+      src: Array.from({ length: 25 }, (_, j) => ({ 4: 7, 20: 9, 7: 3 })[j] ?? 0),
+      want: tiles(4, { 32: 7, 16: 9, 9: 3 }),
+    },
+    { name: 'a single weight', cOut: 1, cIn: 1, src: [7], want: tiles(1, { 0: 7 }) },
+    { name: 'empty', cOut: 0, cIn: 0, src: [], want: tiles(0, {}) },
+  ])('$name', ({ cOut, cIn, src, want }) => {
+    expect(packConv1x1Hwc4F16(new Uint16Array(src), cOut, cIn)).toEqual(want);
+  });
+});
+
+describe('packConvWinogradF16', () => {
+  // G for F(4×4, 3×3), so plane (r, c) of a 3×3 kernel g is (G·g·Gᵀ)[r][c].
+  const G = [
+    [1 / 4, 0, 0],
+    [-1 / 6, -1 / 6, -1 / 6],
+    [-1 / 6, 1 / 6, -1 / 6],
+    [1 / 24, 1 / 12, 1 / 6],
+    [1 / 24, -1 / 12, 1 / 6],
+    [0, 0, 1],
+  ];
+  // A kernel with a single 1 at (ty, tx) gives planes G[r][ty]·G[c][tx]; an
+  // all-ones kernel gives s[r]·s[c] with s the row sums of G.
+  const rowSums = G.map((row) => row[0]! + row[1]! + row[2]!);
+  const oneHot = (ty: number, tx: number) => {
+    const g = new Uint16Array(9);
+    g[ty * 3 + tx] = F16_ONE;
+    return g;
+  };
+
+  it.each([
+    { name: 'centre tap', g: oneHot(1, 1), plane: (r: number, c: number) => G[r]![1]! * G[c]![1]! },
+    { name: 'corner tap', g: oneHot(0, 2), plane: (r: number, c: number) => G[r]![0]! * G[c]![2]! },
+    {
+      name: 'all ones',
+      g: new Uint16Array(9).fill(F16_ONE),
+      plane: (r: number, c: number) => rowSums[r]! * rowSums[c]!,
+    },
+  ])('$name: 1 out, 1 in', ({ g, plane }) => {
+    const packed = packConvWinogradF16(g, 1, 1);
+    expect(packed.length).toBe(36 * 16);
+    for (let r = 0; r < 6; r++) {
+      for (let c = 0; c < 6; c++) {
+        const want = plane(r, c);
+        // f16 keeps 11 significant bits.
+        expect(f16BitsToF32(packed[(r * 6 + c) * 16]!)).toBeCloseTo(want, 3);
+      }
+    }
+    // Only entry (in lane 0, out lane 0) of each tile is a real channel.
+    for (let i = 0; i < packed.length; i++) if (i % 16 !== 0) expect(packed[i]).toBe(0);
+  });
+
+  it('places (out 1, in 4) in tile (plane, in block 1, out block 0), entry 0·4 + 1', () => {
+    // 2 out, 5 in: CI4 = 2, CO4 = 1, so tile (k, iB, oB) sits at k·2 + iB.
+    const src = new Uint16Array(2 * 5 * 9);
+    src[(1 * 5 + 4) * 9 + 4] = F16_ONE; // centre tap of out 1, in 4
+    const packed = packConvWinogradF16(src, 2, 5);
+    expect(packed.length).toBe(36 * 2 * 16);
+    for (let k = 0; k < 36; k++) {
+      const want = G[Math.floor(k / 6)]![1]! * G[k % 6]![1]!;
+      expect(f16BitsToF32(packed[(k * 2 + 1) * 16 + 1]!)).toBeCloseTo(want, 3);
+      expect(packed[(k * 2 + 1) * 16]).toBe(0);
+      expect(packed[k * 2 * 16 + 1]).toBe(0);
+    }
   });
 });
 

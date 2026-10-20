@@ -14,6 +14,7 @@ import {
 import {
   channelAffineHwc4Handle,
   conv1x1Kind,
+  conv1x1Unroll,
   conv2dHwc4Handle,
   convTiledBlocks,
   copyChHwc4Handle,
@@ -27,12 +28,16 @@ import {
   createToChwPipeline,
   createToHwc4Pipeline,
   createUpsample2dHwc4Pipeline,
+  createWinogradPipelines,
   depthwiseCols,
+  directCols,
   moveHwc4Handle,
   resizeBilinearHwc4Handle,
   small1x1Lanes,
   toChwHandle,
   toHwc4Handle,
+  winogradHandles,
+  winogradPlaneElems,
 } from '../../kernels/conv/hwc4.ts';
 import { defineSpec, floatDtype, narrow, narrowFloat } from './spec.ts';
 
@@ -170,7 +175,8 @@ function holderBlocks(
 
 export const conv2dHwc4Spec = defineSpec({
   attrs: (p) => {
-    const [kH, kW, stride, padding, groups, hasBias, hasAct] = p.attrs as [
+    const [kH, kW, stride, padding, groups, hasBias, hasAct, winograd] = p.attrs as [
+      number,
       number,
       number,
       number,
@@ -179,7 +185,7 @@ export const conv2dHwc4Spec = defineSpec({
       number,
       number,
     ];
-    return { kH, kW, stride, padding, groups, hasBias, hasAct: hasAct ?? 0 };
+    return { kH, kW, stride, padding, groups, hasBias, hasAct: hasAct ?? 0, winograd };
   },
   cfg: (node, attrs, _ctx, extras) => {
     const [cIn, h, w] = node.pending!.inputs[0]!.shape.dims as [number, number, number];
@@ -199,6 +205,9 @@ export const conv2dHwc4Spec = defineSpec({
         ? convTiledBlocks(cOut, hOut * wOut, cIn * attrs.kH * attrs.kW)
         : 0;
     const depthwise = attrs.groups !== 1;
+    const pxT = oneByOne && pixels % 8 === 0 ? 8 : 4;
+    const kind =
+      attrs.winograd === 1 ? 5 : bmb > 0 ? 4 : kind1x1 !== 0 ? kind1x1 : depthwise ? 2 : 0;
     return {
       cIn,
       cOut,
@@ -209,32 +218,37 @@ export const conv2dHwc4Spec = defineSpec({
       hasBias: attrs.hasBias,
       hasAct: attrs.hasAct,
       hasAdd: extras?.addend !== undefined ? 1 : 0,
-      kind: bmb > 0 ? 4 : kind1x1 !== 0 ? kind1x1 : depthwise ? 2 : 0,
-      pxT: oneByOne && pixels % 8 === 0 ? 8 : 4,
+      kind,
+      pxT,
+      kU: oneByOne ? conv1x1Unroll(Math.ceil(cIn / 4), (pixels / pxT) * Math.ceil(cOut / 4)) : 0,
       ks: kind1x1 === 3 ? small1x1Lanes(cIn) : 0,
       dwCols: depthwise ? depthwiseCols(attrs.kW, wOut) : 0,
+      cols: kind === 0 ? directCols(Math.ceil(cOut / 4), hOut, wOut) : 0,
       bmb,
     };
   },
-  pipeline: (root, _dtype, cfg) => createConv2dHwc4Pipeline(root, cfg),
+  pipeline: (root, _dtype, cfg) =>
+    cfg.kind === 5 ? createWinogradPipelines(root, cfg) : createConv2dHwc4Pipeline(root, cfg),
   encode: ({ node, attrs, cfg, pipeline, inputs, out, extras, ctx }) => {
     const [, h, w] = node.pending!.inputs[0]!.shape.dims as [number, number, number];
     const pOut = node.shape.dims![1]! * node.shape.dims![2]!;
-    return [
-      conv2dHwc4Handle(
-        ctx.root,
-        pipeline,
-        cfg,
-        { h, w, ...holderBlocks(pOut, extras) },
-        {
-          x: narrow(inputs[0]!, 'f16'),
-          w: narrow(inputs[1]!, 'f16'),
-          bias: attrs.hasBias === 1 ? narrow(inputs[2]!, 'f16') : ctx.dummy('f16'),
-          res: extras?.addend !== undefined ? narrow(extras.addend, 'f16') : ctx.dummy('f16'),
-          out: narrow(out, 'f16'),
-        },
-      ),
-    ];
+    const buffers = {
+      x: narrow(inputs[0]!, 'f16'),
+      w: narrow(inputs[1]!, 'f16'),
+      bias: attrs.hasBias === 1 ? narrow(inputs[2]!, 'f16') : ctx.dummy('f16'),
+      res: extras?.addend !== undefined ? narrow(extras.addend, 'f16') : ctx.dummy('f16'),
+      out: narrow(out, 'f16'),
+    };
+    const args = { h, w, ...holderBlocks(pOut, extras) };
+    if ('mul' in pipeline) {
+      // f32 scratch holds the f16 planes, two values per element.
+      return winogradHandles(ctx.root, pipeline, cfg, args, {
+        ...buffers,
+        planesIn: ctx.scratch('winogradIn', winogradPlaneElems(h, w, cfg.cIn) / 2),
+        planesOut: ctx.scratch('winogradOut', winogradPlaneElems(h, w, cfg.cOut) / 2),
+      });
+    }
+    return [conv2dHwc4Handle(ctx.root, pipeline, cfg, args, buffers)];
   },
 });
 

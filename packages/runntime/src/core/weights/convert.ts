@@ -147,6 +147,66 @@ export function packConvHwc4F16(
   return dst;
 }
 
+/** A torch [cOut, cIn, 1, 1] f16 weight for the stride-1 1×1 hwc4 conv: the
+ *  same mat4 tiles as packConvHwc4F16, ordered input block first, tile
+ *  (iB, oB) at iB·CO4 + oB, so neighbouring output blocks read neighbouring
+ *  tiles. */
+export function packConv1x1Hwc4F16(src: Uint16Array, cOut: number, cIn: number): Uint16Array {
+  const ob = Math.ceil(cOut / 4);
+  const ib = Math.ceil(cIn / 4);
+  const dst = new Uint16Array(ob * ib * 16);
+  for (let o = 0; o < cOut; o++) {
+    for (let i = 0; i < cIn; i++) {
+      dst[((i >> 2) * ob + (o >> 2)) * 16 + (i & 3) * 4 + (o & 3)] = src[o * cIn + i]!;
+    }
+  }
+  return dst;
+}
+
+/** Rows of G for Winograd F(4×4, 3×3). */
+const WINOGRAD_G = [
+  [1 / 4, 0, 0],
+  [-1 / 6, -1 / 6, -1 / 6],
+  [-1 / 6, 1 / 6, -1 / 6],
+  [1 / 24, 1 / 12, 1 / 6],
+  [1 / 24, -1 / 12, 1 / 6],
+  [0, 0, 1],
+] as const;
+
+/** A torch [cOut, cIn, 3, 3] f16 conv weight as the 36 Winograd planes
+ *  G·g·Gᵀ, in the hwc4 conv's mat4 tiles: tile (k, iB, oB) at
+ *  (k·CI4 + iB)·CO4 + oB, entry iL holding the output lanes for input lane iL. */
+export function packConvWinogradF16(src: Uint16Array, cOut: number, cIn: number): Uint16Array {
+  const ob = Math.ceil(cOut / 4);
+  const ib = Math.ceil(cIn / 4);
+  const dst = new Uint16Array(36 * ib * ob * 16);
+  const gg = new Float64Array(18);
+  for (let o = 0; o < cOut; o++) {
+    for (let i = 0; i < cIn; i++) {
+      const base = (o * cIn + i) * 9;
+      // G·g, 6×3.
+      for (let r = 0; r < 6; r++) {
+        for (let c = 0; c < 3; c++) {
+          let s = 0;
+          for (let t = 0; t < 3; t++)
+            s += WINOGRAD_G[r]![t]! * f16BitsToF32(src[base + t * 3 + c]!);
+          gg[r * 3 + c] = s;
+        }
+      }
+      // (G·g)·Gᵀ, 6×6.
+      for (let r = 0; r < 6; r++) {
+        for (let c = 0; c < 6; c++) {
+          let s = 0;
+          for (let t = 0; t < 3; t++) s += gg[r * 3 + t]! * WINOGRAD_G[c]![t]!;
+          const tile = ((r * 6 + c) * ib + (i >> 2)) * ob + (o >> 2);
+          dst[tile * 16 + (i & 3) * 4 + (o & 3)] = f32ToF16Bits(s);
+        }
+      }
+    }
+  }
+  return dst;
+}
+
 export function packDwHwc4F16(src: Uint16Array, c: number, kH: number, kW: number): Uint16Array {
   const kk = kH * kW;
   const dst = new Uint16Array(Math.ceil(c / 4) * kk * 4);
