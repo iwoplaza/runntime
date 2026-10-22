@@ -6,7 +6,9 @@ export type ConvAct = Extract<ActName, 'silu' | 'gelu' | 'relu'>;
 
 /** 2D convolution over hwc4-stored f16 activations, with a torch-shaped
  *  surface. Input and output both stay hwc4, and groups are 1 or fully
- *  depthwise. `activation` fuses silu, gelu or relu into the kernel. */
+ *  depthwise. `activation` fuses silu, gelu or relu into the kernel.
+ *  `winograd` runs a 3×3, stride 1, padding 1 conv as Winograd F(4×4, 3×3),
+ *  with the weight packed by packConvWinogradF16. */
 export function conv2d(
   x: Value,
   weight: Value,
@@ -17,6 +19,7 @@ export function conv2d(
     padding: number;
     groups: number;
     activation?: ConvAct;
+    winograd?: boolean;
   },
 ): Value {
   const [cIn, h, w] = wantHwc4('conv2d', x);
@@ -46,6 +49,11 @@ export function conv2d(
   if (bias !== undefined && (bias.shape.dtype !== 'f16' || bias.shape.elems !== cOut)) {
     throw new Error(`conv2d: bias must be f16 with ${cOut} elems (call model.half())`);
   }
+  if (opts.winograd && (kH !== 3 || kW !== 3 || stride !== 1 || padding !== 1 || groups !== 1)) {
+    throw new Error(
+      `conv2d: winograd needs a 3×3, stride 1, padding 1, groups 1 conv, got ${kH}×${kW} stride ${stride} padding ${padding} groups ${groups}`,
+    );
+  }
   const hOut = Math.floor((h + 2 * padding - kH) / stride) + 1;
   const wOut = Math.floor((w + 2 * padding - kW) / stride) + 1;
   const inputs: Value[] = bias !== undefined ? [x, weight, bias] : [x, weight];
@@ -57,5 +65,6 @@ export function conv2d(
     groups,
     bias !== undefined ? 1 : 0,
     ACT_CODE[opts.activation ?? 'none'],
+    opts.winograd ? 1 : 0,
   ]);
 }
