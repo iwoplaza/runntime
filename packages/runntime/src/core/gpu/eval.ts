@@ -110,6 +110,9 @@ export interface CaptureExecutor {
   captureFrame<T>(fn: () => T): {
     targets: T;
     replay: () => void;
+    /** Records the frame's dispatches into `encoder` without submitting, so
+     *  other work can run before and after it in one command buffer. */
+    encodeReplay: (encoder: GPUCommandEncoder) => void;
     /** Replays once with a timestamp pair per dispatch. Per-dispatch passes
      *  remove overlap, so read the sum as relative attribution only. */
     profileReplay: () => Promise<KernelTiming[] | undefined>;
@@ -226,6 +229,7 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
       return {
         targets,
         replay: () => readbacks.submit((encoder) => encodePass(encoder, recorded)),
+        encodeReplay: (encoder) => encodePass(encoder, recorded),
         profileReplay: () => profileHandles(root.device, recorded),
       };
     },
