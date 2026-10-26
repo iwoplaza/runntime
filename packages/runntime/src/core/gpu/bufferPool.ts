@@ -12,6 +12,9 @@ export class BufferPool {
   private free = new Map<string, GpuBufferRef[]>();
   /** Bucket keys acquired since the last trim(). */
   private used = new Set<string>();
+  /** Buffers acquired and not released yet, so dispose() frees the ones a
+   *  captured frame or a caller still holds. */
+  private inUse = new Set<GpuBufferRef>();
 
   constructor(private readonly createBuffer: (shape: ValueMeta) => GpuBufferRef) {}
 
@@ -22,11 +25,13 @@ export class BufferPool {
   acquire(shape: ValueMeta): GpuBufferRef {
     const k = this.key(shape);
     this.used.add(k);
-    const reused = this.free.get(k)?.pop();
-    return reused ?? this.createBuffer(shape);
+    const buffer = this.free.get(k)?.pop() ?? this.createBuffer(shape);
+    this.inUse.add(buffer);
+    return buffer;
   }
 
   release(buffer: GpuBufferRef, shape: ValueMeta): void {
+    this.inUse.delete(buffer);
     const k = this.key(shape);
     const bucket = this.free.get(k);
     if (bucket) bucket.push(buffer);
@@ -47,9 +52,12 @@ export class BufferPool {
     return destroyed;
   }
 
+  /** Destroys every free buffer and every buffer still in use. */
   dispose(): void {
     for (const bucket of this.free.values()) for (const buf of bucket) buf.destroy();
+    for (const buf of this.inUse) buf.destroy();
     this.free.clear();
+    this.inUse.clear();
     this.used.clear();
   }
 }

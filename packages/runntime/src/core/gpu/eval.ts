@@ -105,7 +105,7 @@ export type { KernelTiming };
  *  without walking the graph again. Fixed-shape forwards only. */
 export interface CaptureExecutor {
   /** Runs `fn` once, recording every dispatch. The executor is replay-only
-   *  afterwards. Keep `targets` — their buffers stay valid across replays — and
+   *  afterwards, until dispose(), which also ends the replays. Keep `targets` — their buffers stay valid across replays — and
    *  overwrite inputs in place before each replay. */
   captureFrame<T>(fn: () => T): {
     targets: T;
@@ -151,6 +151,9 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
   };
   /** Memo key to the handles a dispatch encoded. */
   const handleCache = new Map<string, KernelHandle[]>();
+  /** Dummies and scratches, destroyed with the executor. A replaced scratch
+   *  stays here: memoized handles may still bind it. */
+  const owned: { destroy(): void }[] = [];
 
   // Filler for bind slots a pipeline never reads. One per dtype, 4 elements,
   // since vec4 layouts need 16 bytes minimum.
@@ -161,10 +164,16 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
   function dummy(dtype: FloatDtype): FloatBuffer;
   function dummy(dtype: FloatDtype): FloatBuffer {
     if (dtype === 'f16') {
-      dummyF16 ??= root.createBuffer(d.arrayOf(d.f16, 4)).$usage('storage');
+      if (dummyF16 === undefined) {
+        dummyF16 = root.createBuffer(d.arrayOf(d.f16, 4)).$usage('storage');
+        owned.push(dummyF16);
+      }
       return dummyF16;
     }
-    dummyF32 ??= root.createBuffer(d.arrayOf(d.f32, 4)).$usage('storage');
+    if (dummyF32 === undefined) {
+      dummyF32 = root.createBuffer(d.arrayOf(d.f32, 4)).$usage('storage');
+      owned.push(dummyF32);
+    }
     return dummyF32;
   }
 
@@ -172,6 +181,9 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
   // aliasing the captured frame's intermediates.
   let capturing: KernelHandle[] | undefined;
   let frozen = false;
+  /** Bumped by dispose(), so a replay recorded before it throws instead of
+   *  binding destroyed buffers. */
+  let disposals = 0;
 
   const readbacks = new ReadbackQueue(root);
   const scratches = new Map<string, { buf: F32Buffer; elems: number }>();
@@ -185,6 +197,7 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
         checkBindable(root, 4 * elems, `${key} scratch`);
         s = { buf: root.createBuffer(d.arrayOf(d.f32, elems)).$usage('storage'), elems };
         scratches.set(key, s);
+        owned.push(s.buf);
       }
       return s.buf;
     },
@@ -226,11 +239,24 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
       capturing = undefined;
       frozen = true;
       if (recorded.length === 0) throw new Error('captureFrame: fn() submitted no GPU work');
+      const recordedAt = disposals;
+      const live = () => {
+        if (disposals !== recordedAt) throw new Error('captureFrame: replay after dispose()');
+      };
       return {
         targets,
-        replay: () => readbacks.submit((encoder) => encodePass(encoder, recorded)),
-        encodeReplay: (encoder) => encodePass(encoder, recorded),
-        profileReplay: () => profileHandles(root.device, recorded),
+        replay: () => {
+          live();
+          readbacks.submit((encoder) => encodePass(encoder, recorded));
+        },
+        encodeReplay: (encoder) => {
+          live();
+          encodePass(encoder, recorded);
+        },
+        profileReplay: () => {
+          live();
+          return profileHandles(root.device, recorded);
+        },
       };
     },
     acquireOutput: (shape) => {
@@ -242,7 +268,19 @@ export function gpuExecutor(root: TgpuRoot, opts: { perf?: GpuPerfSink } = {}): 
       return pool.acquire(shape);
     },
     releaseOutput: (buffer, shape) => pool.release(buffer, shape),
-    dispose: () => pool.dispose(),
+    // Forgets every handle, dummy and scratch it destroys, so a later
+    // dispatch makes fresh ones instead of binding a destroyed buffer. A
+    // captured executor can eval and capture again; its old replays throw.
+    dispose: () => {
+      frozen = false;
+      disposals++;
+      pool.dispose();
+      for (const b of owned.splice(0)) b.destroy();
+      handleCache.clear();
+      scratches.clear();
+      dummyF32 = undefined;
+      dummyF16 = undefined;
+    },
     trim: () => {
       // Memoized handles bind the destroyed buffers.
       if (!frozen && pool.trim()) handleCache.clear();
