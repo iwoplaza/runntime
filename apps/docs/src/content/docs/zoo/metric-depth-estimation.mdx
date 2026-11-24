@@ -1,0 +1,162 @@
+---
+title: Metric depth estimation
+description: How many meters away each pixel of a photo is.
+---
+
+Metric depth estimation tells how far away each pixel of a photo is, in
+meters. You pass in the pixels and get back a depth map at the photo's own
+aspect ratio, and the camera's focal length when the photo comes without
+one. Unlike [depth estimation](/zoo/depth-estimation/), the values are
+distances you can measure with, or turn into a 3D point cloud.
+
+`createMetricDepthEstimator` runs Apple's
+[Depth Pro 2](https://github.com/apple-aiml-research/ml-depth-pro-2) on the
+GPU, with its field-of-view estimator for the focal length.
+
+:::caution[Non-commercial research only]
+The Depth Pro 2 weights are under the
+[Apple Machine Learning Research Model License](https://github.com/apple-aiml-research/ml-depth-pro-2/blob/main/LICENSE_MODEL):
+use for non-commercial scientific research only, not in a commercial product
+or service. Read the license before you ship anything with them.
+:::
+
+## Quick start
+
+```ts twoslash
+declare const canvas: HTMLCanvasElement;
+// ---cut---
+import { createMetricDepthEstimator, imageBufferFromImageData, models } from 'runntime/zoo';
+
+// 1. Load the model once. The weights download from the Hugging Face Hub.
+const estimator = await createMetricDepthEstimator(
+  models.metricDepthEstimation.DEPTH_PRO_2.DEFAULT,
+);
+
+// 2. Get the pixels of a photo, here from a canvas the photo is drawn on.
+const ctx = canvas.getContext('2d')!;
+const image = imageBufferFromImageData(ctx.getImageData(0, 0, canvas.width, canvas.height));
+
+// 3. Estimate the depth.
+const depth = await estimator.estimateDepth(image);
+
+// 4. Use it: meters per pixel, row by row.
+const { width, height, data, focalLengthPx } = depth;
+const center = data[Math.floor(height / 2) * width + Math.floor(width / 2)];
+
+// 5. Free the GPU memory when done.
+estimator.dispose();
+```
+
+The engine must be set up first, see [Getting started](/zoo/getting-started/).
+The convolutions run in half precision, so the device needs `shader-f16`.
+
+## Results
+
+`estimateDepth` returns one depth map:
+
+```ts
+interface MetricDepthMap {
+  width: number; // the photo's width, or less with maxSide
+  height: number;
+  data: Float32Array; // width × height distances in meters, row by row
+  focalLengthPx: number; // in pixels of the photo passed in
+}
+```
+
+- `data` is the distance along the camera's viewing direction, the z
+  coordinate of each point, not the straight-line distance from the camera.
+- The sky is `Infinity` or, especially with the smaller model, several
+  kilometers away. Clip the range before you draw the map or build a point
+  cloud.
+- `focalLengthPx` is the focal length the depth is computed with: the one
+  you passed, or the estimate. It applies horizontally and vertically. With
+  the image center as the principal point, pixel `(x, y)` at depth `z` is the
+  point `((x - width / 2) * z / f, (y - height / 2) * z / f, z)`, where `f`
+  is `focalLengthPx` scaled to the map, `focalLengthPx * width / image.width`.
+- Depth scales with the focal length: a focal length 10% too long places
+  everything 10% too far.
+
+## Methods
+
+```ts
+function createMetricDepthEstimator(
+  model?: MetricDepthEstimatorModel,
+  options?: LoadOptions,
+): Promise<MetricDepthEstimator>;
+
+interface MetricDepthEstimator {
+  readonly size: 's' | 'b';
+  estimateDepth(image: ImageBuffer, options?: EstimateMetricDepthOptions): Promise<MetricDepthMap>;
+  dispose(): void;
+}
+
+interface EstimateMetricDepthOptions {
+  readonly focalLengthPx?: number;
+}
+```
+
+- `estimateDepth(image, options?)` returns one depth map for the image.
+  `image` is an `ImageBuffer` of any size. Build one with
+  `imageBufferFromImageData(imageData)` from a canvas, or
+  `imageBuffer(bytes, width, height, format?)` from raw `rgba`, `rgb`,
+  `bgra`, `bgr` or `gray` bytes. Calls run one after another.
+  - **focalLengthPx** - the camera's focal length in pixels of `image`,
+    when you know it: from a calibrated camera, or from a photo's EXIF data.
+    The field-of-view estimator then does not run. Default: estimated.
+- `size` is the model size, read from the weights.
+- `dispose()` frees the GPU memory.
+
+A photo usually records its focal length in EXIF as a 35 mm equivalent, in
+millimeters. In pixels, that is
+`f35mm * Math.hypot(width, height) / Math.hypot(36, 24)`.
+
+## Options
+
+The first argument is the model config, a plain object with the fields
+below. `models.metricDepthEstimation.DEPTH_PRO_2` holds ready-made ones: `S`
+(the `DEFAULT`) and `B` (sharper, slower). Pass one as is, or copy it with a
+field changed.
+
+```ts
+interface MetricDepthEstimatorModel {
+  readonly modelPath?: ModelPath;
+  readonly fovPath?: ModelPath;
+  readonly maxSide?: number; // default 1024
+}
+
+type ModelPath = string | RangeSource; // a URL, or bytes you already have
+```
+
+Example:
+
+```ts twoslash
+import { createMetricDepthEstimator, models } from 'runntime/zoo';
+
+// The base size, reading photos up to 1536 pixels on the longer side.
+await createMetricDepthEstimator({ ...models.metricDepthEstimation.DEPTH_PRO_2.B, maxSide: 1536 });
+```
+
+- **modelPath** - the Depth Pro 2 weights, a `model.safetensors` file of
+  the S or B size. Default:
+  `models.metricDepthEstimation.DEPTH_PRO_2.DEFAULT.modelPath`.
+- **fovPath** - the field-of-view estimator's weights. Default:
+  `models.metricDepthEstimation.DEPTH_PRO_2.DEFAULT.fovPath`.
+- **maxSide** - a photo with a longer side is scaled down to it, aspect
+  ratio kept, before the model reads it, and the map comes back at that
+  size. The model reads the whole photo at once, so time and memory grow
+  with the square of its pixel count. A much smaller photo loses detail and
+  can shift the scale of the depth. Default: 1024.
+
+## Loading options
+
+The second argument controls the download and the warm-up run, the same
+`LoadOptions` as every task. See
+[Depth estimation](/zoo/depth-estimation/#loading-options). `cacheId` names
+the depth weights; the field-of-view weights keep their default key.
+
+## Supported models
+
+| Model                                                                       | Config                                       | Weights                            | Output                    |
+| --------------------------------------------------------------------------- | -------------------------------------------- | ---------------------------------- | ------------------------- |
+| [Depth Pro 2](https://github.com/apple-aiml-research/ml-depth-pro-2) S, 24M | `models.metricDepthEstimation.DEPTH_PRO_2.S` | f16, 49 MB, and 47 MB for the FOV  | depth in meters, any size |
+| [Depth Pro 2](https://github.com/apple-aiml-research/ml-depth-pro-2) B, 97M | `models.metricDepthEstimation.DEPTH_PRO_2.B` | f16, 193 MB, and 47 MB for the FOV | depth in meters, any size |

@@ -152,6 +152,7 @@ export default defineConfig({
                     { label: 'Instance segmentation', slug: 'zoo/instance-segmentation' },
                     { label: 'Pose & keypoints', slug: 'zoo/pose-and-keypoints' },
                     { label: 'Depth estimation', slug: 'zoo/depth-estimation' },
+                    { label: 'Metric depth estimation', slug: 'zoo/metric-depth-estimation' },
                     { label: 'Image classification', slug: 'zoo/image-classification' },
                   ],
                 },

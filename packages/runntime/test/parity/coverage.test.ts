@@ -1,11 +1,17 @@
 /** Every entry in `models` has a parity manifest, with inputs and
  *  thresholds. Runs without a GPU, so CI holds a new model to it. */
 import { describe, expect, it } from 'vitest';
+import { DEPTH_PRO_2_B_PARITY, DEPTH_PRO_2_S_PARITY } from '../zoo/depth-pro-2/parity.manifest.ts';
 import { MINILM_PARITY } from '../zoo/minilm/parity.manifest.ts';
 import { MOBILENETV4_PARITY } from '../zoo/mobilenetv4/parity.manifest.ts';
 import { covers, modelEntries, type ParityManifest } from './manifest.ts';
 
-const MANIFESTS: readonly ParityManifest[] = [MINILM_PARITY, MOBILENETV4_PARITY];
+const MANIFESTS: readonly ParityManifest[] = [
+  MINILM_PARITY,
+  MOBILENETV4_PARITY,
+  DEPTH_PRO_2_S_PARITY,
+  DEPTH_PRO_2_B_PARITY,
+];
 
 /** Families in `models` without a manifest, by the start of their entries'
  *  paths. A family leaves the list with its manifest. A new model is never

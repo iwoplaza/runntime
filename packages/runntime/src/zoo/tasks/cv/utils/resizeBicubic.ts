@@ -1,53 +1,19 @@
-/** Antialiased bicubic resize on the CPU. Downscaling widens the kernel by
- *  the scale, so every source pixel counts and fine detail does not
- *  alias. */
+/** Antialiased bicubic resize on the CPU. */
 
 import { checkImageBuffer, checkImageSize, FORMAT_CHANNELS, type ImageBuffer } from '../image.ts';
 import { RGB_INDEX } from './imagePreprocessor.ts';
+import { resampleAxis } from './resampleAxis.ts';
 
 /** The a of Keys' cubic convolution kernel. */
 const CUBIC_A = -0.5;
+/** Source pixels each side the cubic kernel spans at scale 1. */
+const CUBIC_RADIUS = 2;
 
 function cubic(x: number): number {
   const t = Math.abs(x);
   if (t < 1) return ((CUBIC_A + 2) * t - (CUBIC_A + 3)) * t * t + 1;
   if (t < 2) return (((t - 5) * t + 8) * t - 4) * CUBIC_A;
   return 0;
-}
-
-/** For each output index, the first source index and the normalized
- *  weights of the source pixels it blends, `taps` slots per output. */
-interface Axis {
-  start: Int32Array;
-  count: Int32Array;
-  weights: Float32Array;
-  taps: number;
-}
-
-function buildAxis(outLen: number, srcLen: number): Axis {
-  const scale = srcLen / outLen;
-  // The kernel spans 2 pixels each side, widened by the scale when shrinking.
-  const support = 2 * Math.max(scale, 1);
-  const inv = 1 / Math.max(scale, 1);
-  const taps = Math.ceil(support) * 2 + 1;
-  const start = new Int32Array(outLen);
-  const count = new Int32Array(outLen);
-  const weights = new Float32Array(outLen * taps);
-  for (let i = 0; i < outLen; i++) {
-    const center = scale * (i + 0.5);
-    const lo = Math.max(Math.trunc(center - support + 0.5), 0);
-    const n = Math.min(Math.trunc(center + support + 0.5), srcLen) - lo;
-    let total = 0;
-    for (let j = 0; j < n; j++) {
-      const w = cubic((j + lo - center + 0.5) * inv);
-      weights[i * taps + j] = w;
-      total += w;
-    }
-    if (total !== 0) for (let j = 0; j < n; j++) weights[i * taps + j]! /= total;
-    start[i] = lo;
-    count[i] = n;
-  }
-  return { start, count, weights, taps };
 }
 
 /** `image` resized to width × height: RGB [3, height, width] of whole
@@ -61,8 +27,8 @@ export function resizeBicubic(image: ImageBuffer, width: number, height: number)
   const rgb = RGB_INDEX[image.format];
   const srcW = image.width;
   const srcH = image.height;
-  const xs = buildAxis(width, srcW);
-  const ys = buildAxis(height, srcH);
+  const xs = resampleAxis(width, srcW, cubic, CUBIC_RADIUS);
+  const ys = resampleAxis(height, srcH, cubic, CUBIC_RADIUS);
 
   // Horizontal pass: [3, srcH, width], the three channels of a pixel at
   // once. The clamped array rounds and clamps.

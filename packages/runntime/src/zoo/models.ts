@@ -12,6 +12,7 @@ import type { SpeechToTextModel } from './tasks/audio/speechToText.ts';
 import type { TextToSpeechModel } from './tasks/audio/textToSpeech.ts';
 import type { ImageClassifierModel } from './tasks/cv/imageClassification.ts';
 import type { DepthEstimatorModel } from './tasks/cv/depthEstimation.ts';
+import type { MetricDepthEstimatorModel } from './tasks/cv/metricDepthEstimation.ts';
 import type { InstanceSegmenterModel } from './tasks/cv/instanceSegmentation.ts';
 import type { ObjectDetectorModel } from './tasks/cv/objectDetection.ts';
 import type { KeypointDetectorModel } from './tasks/cv/keypointDetection.ts';
@@ -117,6 +118,14 @@ const REVERB_INT4 = reverb('runntime/int4');
 const DEPTHART_S = { modelPath: weights('depthart', 's', 'f16') } satisfies DepthEstimatorModel;
 const DEPTHART_B = { modelPath: weights('depthart', 'b', 'f16') } satisfies DepthEstimatorModel;
 
+/** Depth Pro 2 of one size with the field-of-view estimator, both f16. */
+const depthPro2 = (size: 's' | 'b') =>
+  ({
+    modelPath: weights('depth-pro-2', size, 'f16'),
+    fovPath: weights('depth-pro-2', 'fov', 'f16'),
+  }) satisfies MetricDepthEstimatorModel;
+const DEPTH_PRO_2_S = depthPro2('s');
+
 export const models = {
   embedding: {
     /** Google's EmbeddingGemma 2: text in 100+ languages and code, images
@@ -204,6 +213,20 @@ export const models = {
       S: DEPTHART_S,
       /** The base size, 24 MB. More detail, slower. */
       B: DEPTHART_B,
+    },
+  },
+  metricDepthEstimation: {
+    /** Apple's Depth Pro 2: depth in meters at the photo's own aspect
+     *  ratio, and the focal length when the photo has none. Weights under
+     *  the Apple Machine Learning Research Model License: non-commercial
+     *  research only. */
+    DEPTH_PRO_2: {
+      DEFAULT: DEPTH_PRO_2_S,
+      /** The small size, 24M parameters, 49 MB, and the 47 MB field-of-view
+       *  estimator. */
+      S: DEPTH_PRO_2_S,
+      /** The base size, 97M parameters, 193 MB. Sharper, slower. */
+      B: depthPro2('b'),
     },
   },
   imageClassification: {

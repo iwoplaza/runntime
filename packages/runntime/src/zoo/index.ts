@@ -114,6 +114,15 @@ export {
 export type { DepthartVariant } from './depthart/estimator.ts';
 
 export {
+  createMetricDepthEstimator,
+  type EstimateMetricDepthOptions,
+  type MetricDepthEstimator,
+  type MetricDepthEstimatorModel,
+  type MetricDepthMap,
+} from './tasks/cv/metricDepthEstimation.ts';
+export type { DepthPro2Size } from './depth-pro-2/estimator.ts';
+
+export {
   createImageClassifier,
   type ClassificationList,
   type ClassifyInput,
