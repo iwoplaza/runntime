@@ -22,6 +22,8 @@ import {
 import {
   convTranspose2dHandle,
   createConvTranspose2dPipeline,
+  convTranspose2dHwc4Handle,
+  createConvTranspose2dHwc4Pipeline,
 } from '../../kernels/conv/convTranspose2d.ts';
 import {
   channelAffineHwc4Handle,
@@ -271,6 +273,38 @@ export const convTranspose2dSpec = defineSpec({
           out: narrowFloat(out, dtype),
         },
         elemFor(dtype),
+      ),
+    ];
+  },
+});
+
+/** The hwc4 route of convTranspose2d: f16 storage in and out, f32 bias. */
+export const convTranspose2dHwc4Spec = defineSpec({
+  attrs: (p) => {
+    const [k, hasBias] = p.attrs as [number, number];
+    return { k, hasBias };
+  },
+  cfg: (node, attrs) => ({
+    cIn: node.pending!.inputs[0]!.shape.dims![0]!,
+    cOut: node.shape.dims![0]!,
+    k: attrs.k,
+    hasBias: attrs.hasBias,
+  }),
+  pipeline: (root, _dtype, cfg) => createConvTranspose2dHwc4Pipeline(root, cfg),
+  encode: ({ node, attrs, cfg, pipeline, inputs, out, ctx }) => {
+    const [, h, w] = node.pending!.inputs[0]!.shape.dims as [number, number, number];
+    return [
+      convTranspose2dHwc4Handle(
+        ctx.root,
+        pipeline,
+        cfg,
+        { h, w },
+        {
+          x: narrow(inputs[0]!, 'f16'),
+          w: narrow(inputs[1]!, 'f16'),
+          bias: attrs.hasBias === 1 ? narrow(inputs[2]!, 'f32') : ctx.dummy('f32'),
+          out: narrow(out, 'f16'),
+        },
       ),
     ];
   },

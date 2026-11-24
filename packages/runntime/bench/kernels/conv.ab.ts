@@ -183,13 +183,22 @@ function gluConv1d(name: string, t: number, c: number, k: number, dtype: 'f32' |
   };
 }
 
-function convTranspose2d(name: string, cIn: number, cOut: number, hw: number): AbCase {
+function convTranspose2d(
+  name: string,
+  cIn: number,
+  cOut: number,
+  hw: number,
+  layout: 'chw' | 'hwc4' = 'chw',
+): AbCase {
   const k = 2;
   return {
     name,
     needs: ['shader-f16'],
     build: (version) => {
-      const x = version.upload(version.rand(cIn * hw * hw), chw(cIn, hw, hw, 'f16'));
+      const x =
+        layout === 'hwc4'
+          ? randHwc4(version, cIn, hw, hw)
+          : version.upload(version.rand(cIn * hw * hw), chw(cIn, hw, hw, 'f16'));
       const bits = version.lib.f32ArrayToF16Bits(version.rand(cIn * cOut * k * k)).data;
       const w = version.freeAfterCase(
         version.lib.materialized(
@@ -200,7 +209,9 @@ function convTranspose2d(name: string, cIn: number, cOut: number, hw: number): A
           ),
         ),
       );
-      const bias = version.upload(version.rand(cOut), { elems: cOut, dtype: 'f16', dims: [cOut] });
+      // The hwc4 route takes an f32 bias.
+      const dtype = layout === 'hwc4' ? 'f32' : 'f16';
+      const bias = version.upload(version.rand(cOut), { elems: cOut, dtype, dims: [cOut] });
       return () => version.lib.convTranspose2d(x, w, bias, { kernelSize: k, stride: k });
     },
   };
@@ -453,6 +464,7 @@ abSuite('conv', [
 
   convTranspose2d('convTranspose2d (paired), YOLO26n-seg proto 64→64 @80²', 64, 64, 80),
   convTranspose2d('convTranspose2d (unpaired), cIn 3 @64²', 3, 8, 64),
+  convTranspose2d('convTranspose2d hwc4, Depth Pro 2 S decoder 64→64 @160²', 64, 64, 160, 'hwc4'),
 
   image('maxPool2d k5, YOLO26n SPPF 128ch @20²', 128, 20, (version, x) =>
     version.lib.maxPool2d(x, { kernelSize: 5, stride: 1, padding: 2 }),

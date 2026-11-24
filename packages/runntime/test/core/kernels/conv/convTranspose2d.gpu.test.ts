@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { toArray } from '../../../../src/core/gpu/eval.ts';
-import { convTranspose2d } from '../../../../src/core/graph/ops.ts';
+import { convTranspose2d, toChw, toHwc4 } from '../../../../src/core/graph/ops.ts';
 import { matrix, tensor3d } from '../../../../src/core/graph/value.ts';
 import { expectClose, gpu, randomF32, requireFeature, roundF16, upload } from '../../../gpu.ts';
 
@@ -135,5 +135,65 @@ describe('convTranspose2d kernel', () => {
     expect(() => convTranspose2d(x, weight(4, 3), undefined, { kernelSize: 2, stride: 2 })).toThrow(
       /weight C_in 3 != input C_in 2/,
     );
+  });
+
+  // hwc4: picked by an hwc4-stored input. One thread per output pixel and
+  // block of 4 output channels, f32 sums, f32 bias; C_in % 4 == 0.
+  describe('hwc4', () => {
+    async function checkHwc4(c: Case) {
+      const x = roundF16(randomF32(c.cIn * c.h * c.w, 1));
+      const wt = roundF16(randomF32(c.cOut * c.k * c.k * c.cIn, 2));
+      const bias = c.bias ? randomF32(c.cOut, 3) : undefined;
+      const got = await toArray(
+        toChw(
+          convTranspose2d(
+            toHwc4(upload(root, x, tensor3d(c.cIn, c.h, c.w))),
+            upload(root, wt, { ...matrix(c.cOut * c.k * c.k, c.cIn), dtype: 'f16' }),
+            bias && upload(root, bias, { elems: c.cOut, dtype: 'f32' }),
+            { kernelSize: c.k, stride: c.k },
+          ),
+          'f32',
+        ),
+        ex,
+      );
+      // Only the f16 store rounds: the sums are f32.
+      expectClose(got, convTranspose2dRef(x, wt, c, bias), { atol: 2e-3, rtol: 2e-3 });
+    }
+
+    it.for([
+      { name: 'k = 2, one channel block', c: { cIn: 4, cOut: 4, h: 3, w: 5, k: 2 } },
+      { name: 'C_out not a multiple of 4', c: { cIn: 8, cOut: 5, h: 4, w: 3, k: 2, bias: true } },
+      { name: 'k = 4, bias', c: { cIn: 12, cOut: 6, h: 3, w: 4, k: 4, bias: true } },
+      { name: 'k = 1', c: { cIn: 4, cOut: 3, h: 5, w: 5, k: 1 } },
+      { name: '1×1 in', c: { cIn: 4, cOut: 1, h: 1, w: 1, k: 2 } },
+      // The Depth Pro 2 S head and decoder shapes.
+      { name: 'Depth Pro 2 decoder', c: { cIn: 64, cOut: 64, h: 20, w: 19, k: 2 } },
+      { name: 'Depth Pro 2 reassemble', c: { cIn: 48, cOut: 48, h: 8, w: 6, k: 4, bias: true } },
+    ])('$name', async ({ c }, ctx) => {
+      requireFeature(ctx, root, 'shader-f16');
+      await checkHwc4(c);
+    });
+
+    it('runs past GRID_Y_STRIDE outputs, in the second grid dimension', async (ctx) => {
+      requireFeature(ctx, root, 'shader-f16');
+      await checkHwc4({ cIn: 4, cOut: 4, h: 512, w: 513, k: 2 });
+    });
+
+    it('refuses C_in not a multiple of 4', (ctx) => {
+      requireFeature(ctx, root, 'shader-f16');
+      const x = toHwc4(upload(root, new Float32Array(6 * 4), tensor3d(6, 2, 2)));
+      expect(() =>
+        convTranspose2d(x, weight(8, 6), undefined, { kernelSize: 2, stride: 2 }),
+      ).toThrow(/an hwc4 input needs C_in a multiple of 4, got 6/);
+    });
+
+    it('refuses an f16 bias', (ctx) => {
+      requireFeature(ctx, root, 'shader-f16');
+      const x = toHwc4(upload(root, new Float32Array(4 * 4), tensor3d(4, 2, 2)));
+      const bias = upload(root, new Float32Array(2), { elems: 2, dtype: 'f16' });
+      expect(() => convTranspose2d(x, weight(8, 4), bias, { kernelSize: 2, stride: 2 })).toThrow(
+        /bias must be f32 with 2 elems/,
+      );
+    });
   });
 });

@@ -960,7 +960,8 @@ export class Conv2d extends Module {
 }
 
 /** Transposed 2D conv, no-overlap form only (k equals stride). The weight
- *  permutes from torch layout at load. */
+ *  permutes from torch layout at load. Takes [C_in, H, W] row-major, or
+ *  hwc4-stored with C_in a multiple of 4, and returns the same layout. */
 export class ConvTranspose2d extends Module {
   readonly weight: Parameter;
   readonly bias?: Parameter;

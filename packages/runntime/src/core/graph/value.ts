@@ -83,6 +83,7 @@ export type OpName =
   | 'conv1d'
   | 'gluConv1d'
   | 'convTranspose2d'
+  | 'convTranspose2dHwc4'
   | 'conv2dHwc4'
   | 'maxPool2dHwc4'
   | 'upsample2dHwc4'
